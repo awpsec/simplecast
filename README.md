@@ -39,7 +39,3 @@ The release APK is generated at:
 ```text
 app/build/outputs/apk/release/app-release.apk
 ```
-
-## Notes
-
-The current release build is signed with the debug signing config for sideload testing. Replace signing configuration before publishing through a store.
