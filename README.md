@@ -4,6 +4,8 @@ simplecast is a minimal Android weather app designed for the Light Phone III And
 
 It uses Open-Meteo for weather and geocoding, keeps the interface black-and-white, and avoids ads, accounts, analytics, and unnecessary UI.
 
+![simplecast home screen](screenshots/home.png)
+
 ## Features
 
 - Current conditions with animated monochrome glyphs
