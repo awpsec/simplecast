@@ -191,6 +191,7 @@ private fun WeatherApp() {
     var homePlace by remember { mutableStateOf(prefs.savedPlace("home")) }
     var allowBackground by remember { mutableStateOf(prefs.getBoolean("allowBackground", false)) }
     var temperatureUnit by remember { mutableStateOf(prefs.getString("temperatureUnit", "fahrenheit") ?: "fahrenheit") }
+    var showIntro by remember { mutableStateOf(!prefs.getBoolean("introSeen", false)) }
     var refreshNonce by remember { mutableStateOf(0) }
     val locationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -269,6 +270,7 @@ private fun WeatherApp() {
         allowBackground = allowBackground,
         homePlace = homePlace,
         temperatureUnit = temperatureUnit,
+        showIntro = showIntro,
         onPaneChange = { pane = it },
         onRetry = { refreshNonce++ },
         onAllowBackgroundChange = {
@@ -285,6 +287,10 @@ private fun WeatherApp() {
             temperatureUnit = it
             prefs.edit().putString("temperatureUnit", it).apply()
             refreshNonce++
+        },
+        onIntroDismiss = {
+            showIntro = false
+            prefs.edit().putBoolean("introSeen", true).apply()
         }
     )
 }
@@ -296,11 +302,13 @@ private fun WeatherScreen(
     allowBackground: Boolean,
     homePlace: Place?,
     temperatureUnit: String,
+    showIntro: Boolean,
     onPaneChange: (AppPane) -> Unit,
     onRetry: () -> Unit,
     onAllowBackgroundChange: (Boolean) -> Unit,
     onHomePlaceChange: (Place?) -> Unit,
-    onTemperatureUnitChange: (String) -> Unit
+    onTemperatureUnitChange: (String) -> Unit,
+    onIntroDismiss: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -327,6 +335,35 @@ private fun WeatherScreen(
                 is WeatherState.Error -> CenterMessage("weather unavailable\n${weatherState.message}\ntap to retry", onRetry)
                 is WeatherState.Ready -> Forecast(weatherState.forecast, onRetry, onPaneChange)
             }
+        }
+        if (showIntro) IntroPopup(onDismiss = onIntroDismiss)
+    }
+}
+
+@Composable
+private fun IntroPopup(onDismiss: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.88f))
+            .clickable { onDismiss() }
+            .padding(horizontal = 38.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Rule)
+                .padding(horizontal = 24.dp, vertical = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            TextLine("swipe left for settings", size = 18)
+            Spacer(Modifier.height(12.dp))
+            TextLine("swipe right for lookups", size = 18)
+            Spacer(Modifier.height(12.dp))
+            TextLine("enjoy your day!", size = 18)
+            Spacer(Modifier.height(26.dp))
+            TextLine("tap anywhere", size = 12, color = Rule)
         }
     }
 }
@@ -368,7 +405,7 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
                 }
             }
             if (page == 0 && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
-                if (startY > 600f) {
+                if (startY > 820f) {
                     if (dx < 0f && hourPage < hourPageCount - 1) hourPage++
                     if (dx > 0f && hourPage > 0) hourPage--
                 } else {
