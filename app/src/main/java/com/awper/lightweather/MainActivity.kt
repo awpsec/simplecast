@@ -1210,7 +1210,7 @@ private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: Str
         val hour = HourForecast(time, hourTemps.getDouble(i), hourCodes.getInt(i))
         if (!time.isBefore(now)) {
             allHours += hour
-            if (hours.size < 12) hours += hour
+            if (hours.size < 16) hours += hour
         }
     }
 
