@@ -190,6 +190,7 @@ private fun WeatherApp() {
     var pane by remember { mutableStateOf(AppPane.Home) }
     var homePlace by remember { mutableStateOf(prefs.savedPlace("home")) }
     var allowBackground by remember { mutableStateOf(prefs.getBoolean("allowBackground", false)) }
+    var temperatureUnit by remember { mutableStateOf(prefs.getString("temperatureUnit", "fahrenheit") ?: "fahrenheit") }
     var refreshNonce by remember { mutableStateOf(0) }
     val locationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -216,7 +217,7 @@ private fun WeatherApp() {
 
         if (homePlace != null) {
             weatherState = runCatching {
-                fetchWeather(homePlace!!.latitude, homePlace!!.longitude, fallback = false, locationLabel = homePlace!!.title.lowercase(), cachePrefs = prefs)
+                fetchWeather(homePlace!!.latitude, homePlace!!.longitude, fallback = false, locationLabel = homePlace!!.title.lowercase(), temperatureUnit = temperatureUnit, cachePrefs = prefs)
             }.getOrElse { error ->
                 if (previousState is WeatherState.Ready) previousState else WeatherState.Error(error.message ?: "weather unavailable")
             }
@@ -226,7 +227,7 @@ private fun WeatherApp() {
         val lastDevicePlace = prefs.savedPlace("lastDevice")
         if (lastDevicePlace != null && previousState !is WeatherState.Ready) {
             weatherState = runCatching {
-                fetchWeather(lastDevicePlace.latitude, lastDevicePlace.longitude, fallback = false, locationLabel = lastDevicePlace.title.lowercase(), cachePrefs = prefs)
+                fetchWeather(lastDevicePlace.latitude, lastDevicePlace.longitude, fallback = false, locationLabel = lastDevicePlace.title.lowercase(), temperatureUnit = temperatureUnit, cachePrefs = prefs)
             }.getOrElse { error ->
                 WeatherState.Error(error.message ?: "weather unavailable")
             }
@@ -248,7 +249,7 @@ private fun WeatherApp() {
         ) > 2_000f
 
         if (shouldFetchCheckedLocation || previousState !is WeatherState.Ready) {
-            weatherState = runCatching { fetchWeather(lat, lon, fallback, locationLabel, cachePrefs = prefs) }
+            weatherState = runCatching { fetchWeather(lat, lon, fallback, locationLabel, temperatureUnit = temperatureUnit, cachePrefs = prefs) }
                 .onSuccess {
                     if (point != null) {
                         prefs.edit().putPlace("lastDevice", Place(locationLabel, point.latitude, point.longitude)).apply()
@@ -267,6 +268,7 @@ private fun WeatherApp() {
         pane = pane,
         allowBackground = allowBackground,
         homePlace = homePlace,
+        temperatureUnit = temperatureUnit,
         onPaneChange = { pane = it },
         onRetry = { refreshNonce++ },
         onAllowBackgroundChange = {
@@ -278,6 +280,11 @@ private fun WeatherApp() {
             homePlace = it
             prefs.edit().putPlace("home", it).apply()
             refreshNonce++
+        },
+        onTemperatureUnitChange = {
+            temperatureUnit = it
+            prefs.edit().putString("temperatureUnit", it).apply()
+            refreshNonce++
         }
     )
 }
@@ -288,10 +295,12 @@ private fun WeatherScreen(
     pane: AppPane,
     allowBackground: Boolean,
     homePlace: Place?,
+    temperatureUnit: String,
     onPaneChange: (AppPane) -> Unit,
     onRetry: () -> Unit,
     onAllowBackgroundChange: (Boolean) -> Unit,
-    onHomePlaceChange: (Place?) -> Unit
+    onHomePlaceChange: (Place?) -> Unit,
+    onTemperatureUnitChange: (String) -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -303,12 +312,14 @@ private fun WeatherScreen(
             )
     ) {
         when (pane) {
-            AppPane.Search -> SearchPane(onClose = { onPaneChange(AppPane.Home) })
+            AppPane.Search -> SearchPane(temperatureUnit = temperatureUnit, onClose = { onPaneChange(AppPane.Home) })
             AppPane.Settings -> SettingsPane(
                 allowBackground = allowBackground,
                 homePlace = homePlace,
+                temperatureUnit = temperatureUnit,
                 onAllowBackgroundChange = onAllowBackgroundChange,
                 onHomePlaceChange = onHomePlaceChange,
+                onTemperatureUnitChange = onTemperatureUnitChange,
                 onClose = { onPaneChange(AppPane.Home) }
             )
             AppPane.Home -> when (weatherState) {
@@ -325,12 +336,13 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
     var page by remember { mutableStateOf(0) }
     var hourPage by remember(forecast.hours) { mutableStateOf(0) }
     var dayPage by remember(forecast.days) { mutableStateOf(0) }
+    var selectedDay by remember(forecast.days) { mutableStateOf<LocalDate?>(null) }
     var refreshing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val hourPageCount = forecast.hours.chunked(4).size.coerceAtLeast(1)
     val dayPageCount = forecast.days.take(10).chunked(5).size.coerceAtLeast(1)
 
-    DisposableEffect(page, hourPage, dayPage, hourPageCount, dayPageCount) {
+    DisposableEffect(page, hourPage, dayPage, selectedDay, hourPageCount, dayPageCount) {
         GestureRouter.onSwipe = { dx, dy, _, startY ->
             if (page == 0 && dy > 170f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
                 if (!refreshing) {
@@ -343,18 +355,20 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
                     }
                 }
             } else if (kotlin.math.abs(dy) > kotlin.math.abs(dx) && kotlin.math.abs(dy) > 120f) {
-                if (page == 0 && dy < 0f) {
+                if (page == 1 && selectedDay != null && dy > 0f) {
+                    selectedDay = null
+                } else if (page == 0 && dy < 0f) {
                     page = 1
-                } else if (page == 1 && dy < 0f && dayPage < dayPageCount - 1) {
+                } else if (page == 1 && selectedDay == null && dy < 0f && dayPage < dayPageCount - 1) {
                     dayPage++
-                } else if (page == 1 && dy > 0f && dayPage > 0) {
+                } else if (page == 1 && selectedDay == null && dy > 0f && dayPage > 0) {
                     dayPage--
-                } else if (page == 1 && dy > 0f) {
+                } else if (page == 1 && selectedDay == null && dy > 0f) {
                     page = 0
                 }
             }
             if (page == 0 && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
-                if (startY > 760f) {
+                if (startY > 600f) {
                     if (dx < 0f && hourPage < hourPageCount - 1) hourPage++
                     if (dx > 0f && hourPage > 0) hourPage--
                 } else {
@@ -362,7 +376,7 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
                     if (dx > 0f) onPaneChange(AppPane.Search)
                 }
             }
-            if (page == 1 && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
+            if (page == 1 && selectedDay == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
                 if (dx < 0f && dayPage < dayPageCount - 1) dayPage++
                 if (dx > 0f && dayPage > 0) dayPage--
             }
@@ -386,7 +400,7 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
         if (page == 0) {
             CurrentAndHourlyPage(forecast, hourPage)
         } else {
-            TenDayPage(forecast, dayPage)
+            TenDayPage(forecast, dayPage, selectedDay, onSelectDay = { selectedDay = it }, onBack = { selectedDay = null })
         }
     }
 }
@@ -399,7 +413,7 @@ private fun CurrentAndHourlyPage(forecast: Forecast, hourPage: Int) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             WeatherGlyph(displayCode, Modifier.size(66.dp), animated = true)
             Spacer(Modifier.width(24.dp))
-            TextLine("${forecast.current.temperature.roundToInt()}°", size = 50, weight = FontWeight.Light)
+            TextLine(formatTemp(forecast.current.temperature, forecast.unitSymbol), size = 50, weight = FontWeight.Light)
         }
         Spacer(Modifier.height(12.dp))
         TextLine(weatherLabel(displayCode), size = 19)
@@ -409,12 +423,23 @@ private fun CurrentAndHourlyPage(forecast: Forecast, hourPage: Int) {
         Spacer(Modifier.height(24.dp))
         TextLine("hourly", size = 14, color = Rule)
         Spacer(Modifier.height(12.dp))
-        HourlyPager(forecast.hours, hourPage)
+        HourlyPager(forecast.hours, hourPage, forecast.unitSymbol)
     }
 }
 
 @Composable
-private fun TenDayPage(forecast: Forecast, dayPage: Int) {
+private fun TenDayPage(
+    forecast: Forecast,
+    dayPage: Int,
+    selectedDay: LocalDate?,
+    onSelectDay: (LocalDate) -> Unit,
+    onBack: () -> Unit
+) {
+    if (selectedDay != null) {
+        DayHourlyPage(forecast, selectedDay, onBack)
+        return
+    }
+
     val pages = forecast.days.take(10).chunked(5).ifEmpty { listOf(emptyList()) }
     val safePage = dayPage.coerceIn(0, pages.lastIndex)
 
@@ -430,7 +455,8 @@ private fun TenDayPage(forecast: Forecast, dayPage: Int) {
             ForecastRow(
                 left = formatDay(day.date),
                 code = day.code,
-                right = "${day.high.roundToInt()}° / ${day.low.roundToInt()}°"
+                right = "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}",
+                onClick = { onSelectDay(day.date) }
             )
         }
         Spacer(Modifier.height(12.dp))
@@ -439,7 +465,35 @@ private fun TenDayPage(forecast: Forecast, dayPage: Int) {
 }
 
 @Composable
-private fun SearchPane(onClose: () -> Unit) {
+private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Unit) {
+    val hours = forecast.allHours.filter { it.time.toLocalDate() == date }
+    Column(
+        modifier = Modifier
+            .fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        TopArrow(onBack)
+        TextLine(formatDay(date).lowercase(), size = 18)
+        Spacer(Modifier.height(12.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            hours.forEach { hour ->
+                ForecastRow(
+                    left = formatHour(hour.time).lowercase(),
+                    code = hour.code,
+                    right = formatTemp(hour.temperature, forecast.unitSymbol)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchPane(temperatureUnit: String, onClose: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var places by remember { mutableStateOf(emptyList<Place>()) }
     var selectedPlace by remember { mutableStateOf<Place?>(null) }
@@ -488,7 +542,7 @@ private fun SearchPane(onClose: () -> Unit) {
         val place = selectedPlace ?: return@LaunchedEffect
         selectedHourPage = 0
         selectedState = WeatherState.Loading("loading weather")
-        selectedState = runCatching { fetchWeather(place.latitude, place.longitude, fallback = false, locationLabel = place.title.lowercase()) }
+        selectedState = runCatching { fetchWeather(place.latitude, place.longitude, fallback = false, locationLabel = place.title.lowercase(), temperatureUnit = temperatureUnit) }
             .getOrElse { WeatherState.Error(it.message ?: "weather unavailable") }
     }
 
@@ -527,8 +581,10 @@ private fun SearchPane(onClose: () -> Unit) {
 private fun SettingsPane(
     allowBackground: Boolean,
     homePlace: Place?,
+    temperatureUnit: String,
     onAllowBackgroundChange: (Boolean) -> Unit,
     onHomePlaceChange: (Place?) -> Unit,
+    onTemperatureUnitChange: (String) -> Unit,
     onClose: () -> Unit
 ) {
     var homeQuery by remember { mutableStateOf("") }
@@ -569,6 +625,13 @@ private fun SettingsPane(
             TextLine("allow in background", size = 18, modifier = Modifier.weight(1f), align = TextAlign.Start)
             OvalSwitch(checked = allowBackground) { onAllowBackgroundChange(!allowBackground) }
         }
+        Spacer(Modifier.height(24.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextLine("temperature", size = 18, modifier = Modifier.weight(1f), align = TextAlign.Start)
+            UnitChoice(label = "f", selected = temperatureUnit == "fahrenheit") { onTemperatureUnitChange("fahrenheit") }
+            Spacer(Modifier.width(10.dp))
+            UnitChoice(label = "c", selected = temperatureUnit == "celsius") { onTemperatureUnitChange("celsius") }
+        }
         Spacer(Modifier.height(34.dp))
         TextLine("home location", size = 14, color = Rule)
         Spacer(Modifier.height(12.dp))
@@ -608,8 +671,21 @@ private fun SearchForecast(forecast: Forecast, hourPage: Int) {
         TextLine("10 day", size = 12, color = Rule)
         Spacer(Modifier.height(10.dp))
         forecast.days.take(10).forEach { day ->
-            ForecastRow(formatDay(day.date), day.code, "${day.high.roundToInt()}° / ${day.low.roundToInt()}°")
+            ForecastRow(formatDay(day.date), day.code, "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}")
         }
+    }
+}
+
+@Composable
+private fun UnitChoice(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(34.dp)
+            .border(if (selected) 2.dp else 1.dp, if (selected) Ink else Rule)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        TextLine(label, size = 16, color = if (selected) Ink else Rule)
     }
 }
 
@@ -705,7 +781,7 @@ private fun PullDots(visible: Boolean) {
 }
 
 @Composable
-private fun HourlyPager(hours: List<HourForecast>, hourPage: Int) {
+private fun HourlyPager(hours: List<HourForecast>, hourPage: Int, unitSymbol: String) {
     val pages = hours.chunked(4).ifEmpty { listOf(emptyList()) }
     val safePage = hourPage.coerceIn(0, pages.lastIndex)
 
@@ -719,6 +795,7 @@ private fun HourlyPager(hours: List<HourForecast>, hourPage: Int) {
             HourCard(
                 hour = hour,
                 isCurrent = safePage == 0 && index == 0,
+                unitSymbol = unitSymbol,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -731,7 +808,7 @@ private fun HourlyPager(hours: List<HourForecast>, hourPage: Int) {
 }
 
 @Composable
-private fun HourCard(hour: HourForecast, isCurrent: Boolean, modifier: Modifier = Modifier) {
+private fun HourCard(hour: HourForecast, isCurrent: Boolean, unitSymbol: String, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .height(108.dp)
@@ -744,18 +821,20 @@ private fun HourCard(hour: HourForecast, isCurrent: Boolean, modifier: Modifier 
         Spacer(Modifier.height(6.dp))
         WeatherGlyph(hour.code, Modifier.size(22.dp), animated = false)
         Spacer(Modifier.height(6.dp))
-        TextLine("${hour.temperature.roundToInt()}°", size = 16)
+        TextLine(formatTemp(hour.temperature, unitSymbol), size = 16)
     }
 }
 
 @Composable
-private fun ForecastRow(left: String, code: Int, right: String) {
+private fun ForecastRow(left: String, code: Int, right: String, onClick: (() -> Unit)? = null) {
+    val rowModifier = Modifier
+        .fillMaxWidth()
+        .height(52.dp)
+        .border(1.dp, Rule)
+        .then(if (onClick == null) Modifier else Modifier.clickable { onClick() })
+        .padding(horizontal = 20.dp)
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(52.dp)
-            .border(1.dp, Rule)
-            .padding(horizontal = 20.dp),
+        modifier = rowModifier,
         verticalAlignment = Alignment.CenterVertically
     ) {
         TextLine(left.lowercase(), size = 17, modifier = Modifier.weight(1f), align = TextAlign.Start)
@@ -1053,14 +1132,16 @@ private suspend fun fetchWeather(
     longitude: Double,
     fallback: Boolean,
     locationLabel: String,
+    temperatureUnit: String = "fahrenheit",
     cachePrefs: SharedPreferences? = null
 ): WeatherState.Ready = withContext(Dispatchers.IO) {
+    val unit = if (temperatureUnit == "celsius") "celsius" else "fahrenheit"
     val url = "https://api.open-meteo.com/v1/forecast" +
         "?latitude=$latitude&longitude=$longitude" +
         "&current=temperature_2m,weather_code,wind_speed_10m" +
         "&hourly=temperature_2m,weather_code" +
         "&daily=weather_code,temperature_2m_max,temperature_2m_min" +
-        "&temperature_unit=fahrenheit&forecast_days=10&timezone=auto"
+        "&temperature_unit=$unit&forecast_days=10&timezone=auto"
     val connection = URL(url).openConnection() as HttpURLConnection
     connection.connectTimeout = 10_000
     connection.readTimeout = 10_000
@@ -1070,11 +1151,12 @@ private suspend fun fetchWeather(
         ?.putString("cachedWeatherBody", body)
         ?.putBoolean("cachedWeatherFallback", fallback)
         ?.putString("cachedWeatherLocation", locationLabel)
+        ?.putString("cachedWeatherUnit", unit)
         ?.apply()
-    parseWeatherBody(body, fallback, locationLabel)
+    parseWeatherBody(body, fallback, locationLabel, unit)
 }
 
-private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: String): WeatherState.Ready {
+private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: String, temperatureUnit: String): WeatherState.Ready {
     val json = JSONObject(body)
     val currentJson = json.getJSONObject("current")
     val hourlyJson = json.getJSONObject("hourly")
@@ -1082,15 +1164,17 @@ private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: Str
 
     val now = LocalDateTime.parse(currentJson.getString("time"))
     val hours = mutableListOf<HourForecast>()
+    val allHours = mutableListOf<HourForecast>()
     val hourTimes = hourlyJson.getJSONArray("time")
     val hourTemps = hourlyJson.getJSONArray("temperature_2m")
     val hourCodes = hourlyJson.getJSONArray("weather_code")
     for (i in 0 until hourTimes.length()) {
         val time = LocalDateTime.parse(hourTimes.getString(i))
+        val hour = HourForecast(time, hourTemps.getDouble(i), hourCodes.getInt(i))
         if (!time.isBefore(now)) {
-            hours += HourForecast(time, hourTemps.getDouble(i), hourCodes.getInt(i))
+            allHours += hour
+            if (hours.size < 12) hours += hour
         }
-        if (hours.size == 12) break
     }
 
     val days = mutableListOf<DayForecast>()
@@ -1110,9 +1194,11 @@ private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: Str
                 windSpeed = currentJson.optDouble("wind_speed_10m", 0.0)
             ),
             hours = hours,
+            allHours = allHours,
             days = days,
             usedFallbackLocation = fallback,
-            locationLabel = locationLabel
+            locationLabel = locationLabel,
+            unitSymbol = if (temperatureUnit == "celsius") "°C" else "°F"
         )
     )
 }
@@ -1150,7 +1236,8 @@ private fun SharedPreferences.cachedWeatherState(): WeatherState.Ready? {
     val body = getString("cachedWeatherBody", null) ?: return null
     val fallback = getBoolean("cachedWeatherFallback", false)
     val location = getString("cachedWeatherLocation", null) ?: return null
-    return runCatching { parseWeatherBody(body, fallback, location) }.getOrNull()
+    val unit = getString("cachedWeatherUnit", "fahrenheit") ?: "fahrenheit"
+    return runCatching { parseWeatherBody(body, fallback, location, unit) }.getOrNull()
 }
 
 private fun SharedPreferences.Editor.putPlace(prefix: String, place: Place?): SharedPreferences.Editor {
@@ -1218,6 +1305,8 @@ private fun formatHour(time: LocalDateTime): String = time.format(DateTimeFormat
 
 private fun formatDay(date: LocalDate): String = date.format(DateTimeFormatter.ofPattern("EEE M/d"))
 
+private fun formatTemp(value: Double, unitSymbol: String): String = "${value.roundToInt()}$unitSymbol"
+
 private fun weatherLabel(code: Int): String = when (code) {
     -1 -> "wind"
     0 -> "clear"
@@ -1241,9 +1330,11 @@ private sealed interface WeatherState {
 private data class Forecast(
     val current: CurrentForecast,
     val hours: List<HourForecast>,
+    val allHours: List<HourForecast>,
     val days: List<DayForecast>,
     val usedFallbackLocation: Boolean,
-    val locationLabel: String
+    val locationLabel: String,
+    val unitSymbol: String
 )
 
 private data class CurrentForecast(val temperature: Double, val code: Int, val windSpeed: Double) {
