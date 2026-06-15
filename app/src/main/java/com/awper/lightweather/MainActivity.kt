@@ -20,6 +20,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -57,6 +58,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -934,71 +936,24 @@ private fun TextLine(
 
 @Composable
 private fun WeatherGlyph(code: Int, modifier: Modifier = Modifier, animated: Boolean = true) {
-    var frameTime by remember { mutableStateOf(System.currentTimeMillis()) }
-    if (animated) {
-        LaunchedEffect(code) {
-            while (true) {
-                frameTime = System.currentTimeMillis()
-                delay(50)
-            }
-        }
-    }
+    Image(
+        painter = painterResource(id = weatherIconRes(code)),
+        contentDescription = weatherLabel(code),
+        modifier = modifier
+    )
+}
 
-    Canvas(modifier = modifier) {
-        val stroke = Stroke(width = size.minDimension * 0.024f, cap = StrokeCap.Round)
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val radius = size.minDimension * 0.24f
-        val phase = if (animated) (frameTime % 5_000L).toFloat() / 5_000f else 0f
-        when {
-            code == 0 -> {
-                val shine = if (animated) 1f + kotlin.math.sin(phase * Math.PI.toFloat() * 2f) * 0.08f else 1f
-                drawCircle(Ink, radius = radius, center = center, style = stroke)
-                for (i in 0 until 8) {
-                    val angle = Math.toRadians((i * 45).toDouble())
-                    val start = Offset(
-                        center.x + kotlin.math.cos(angle).toFloat() * radius * 1.45f,
-                        center.y + kotlin.math.sin(angle).toFloat() * radius * 1.45f
-                    )
-                    val end = Offset(
-                        center.x + kotlin.math.cos(angle).toFloat() * radius * 1.85f * shine,
-                        center.y + kotlin.math.sin(angle).toFloat() * radius * 1.85f * shine
-                    )
-                    drawLine(Ink, start, end, strokeWidth = stroke.width, cap = StrokeCap.Round)
-                }
-            }
-            code == -1 -> drawWindCondition(stroke.width, phase)
-            code == 1 -> drawPartlyCloudy(stroke, phase)
-            code == 2 -> drawCloud(stroke, phase)
-            code == 3 -> drawOvercast(stroke, phase)
-            code in 45..48 -> drawFog(stroke.width, phase)
-            code in 56..57 || code in 66..67 || code in 96..99 -> {
-                drawCloud(stroke, phase)
-                val sleetPhase = if (animated) (frameTime % 1_700L).toFloat() / 1_700f else 0f
-                drawSleet(stroke.width, sleetPhase)
-            }
-            code in 51..67 || code in 80..82 -> {
-                drawCloud(stroke, phase)
-                val rainPhase = if (animated) (frameTime % 1_800L).toFloat() / 1_800f else 0f
-                drawRain(stroke.width, rainPhase)
-            }
-            code in 71..77 || code in 85..86 -> {
-                drawCloud(stroke, phase)
-                val snowPhase = if (animated) (frameTime % 2_600L).toFloat() / 2_600f else 0f
-                drawSnow(stroke.width, snowPhase)
-            }
-            code == 95 -> {
-                drawCloud(stroke, phase)
-                val path = androidx.compose.ui.graphics.Path().apply {
-                    moveTo(size.width * 0.52f, size.height * 0.52f)
-                    lineTo(size.width * 0.42f, size.height * 0.70f)
-                    lineTo(size.width * 0.55f, size.height * 0.68f)
-                    lineTo(size.width * 0.46f, size.height * 0.88f)
-                }
-                drawPath(path, Ink, style = stroke)
-            }
-            else -> drawCloud(stroke, phase)
-        }
-    }
+private fun weatherIconRes(code: Int): Int = when {
+    code == -1 -> R.drawable.ic_weather_wind
+    code == 0 -> R.drawable.ic_weather_sun
+    code == 1 -> R.drawable.ic_weather_cloud_sun
+    code in 2..3 -> R.drawable.ic_weather_cloud
+    code in 45..48 -> R.drawable.ic_weather_fog
+    code in 56..57 || code in 66..67 || code in 96..99 -> R.drawable.ic_weather_snow
+    code in 51..67 || code in 80..82 -> R.drawable.ic_weather_rain
+    code in 71..77 || code in 85..86 -> R.drawable.ic_weather_snow
+    code in 95..99 -> R.drawable.ic_weather_storm
+    else -> R.drawable.ic_weather_cloud
 }
 
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCloud(stroke: Stroke, phase: Float = 0f) {
