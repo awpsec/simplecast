@@ -392,9 +392,7 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
                     }
                 }
             } else if (kotlin.math.abs(dy) > kotlin.math.abs(dx) && kotlin.math.abs(dy) > 120f) {
-                if (page == 1 && selectedDay != null && dy > 0f) {
-                    selectedDay = null
-                } else if (page == 0 && dy < 0f) {
+                if (page == 0 && dy < 0f) {
                     page = 1
                 } else if (page == 1 && selectedDay == null && dy < 0f && dayPage < dayPageCount - 1) {
                     dayPage++
@@ -413,9 +411,13 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
                     if (dx > 0f) onPaneChange(AppPane.Search)
                 }
             }
-            if (page == 1 && selectedDay == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
-                if (dx < 0f && dayPage < dayPageCount - 1) dayPage++
-                if (dx > 0f && dayPage > 0) dayPage--
+            if (page == 1 && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
+                if (selectedDay != null) {
+                    if (dx > 0f) selectedDay = null
+                } else {
+                    if (dx < 0f && dayPage < dayPageCount - 1) dayPage++
+                    if (dx > 0f && dayPage > 0) dayPage--
+                }
             }
         }
         GestureRouter.onMove = { _, _ -> }
