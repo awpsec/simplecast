@@ -432,7 +432,6 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         PullDots(visible = refreshing)
-        TextLine("simplecast", size = 22, weight = FontWeight.Normal)
 
         if (page == 0) {
             CurrentAndHourlyPage(forecast, hourPage)
