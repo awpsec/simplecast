@@ -217,6 +217,8 @@ private fun WeatherApp() {
         }
 
         val previousState = weatherState
+        val cacheAgeMs = System.currentTimeMillis() - prefs.getLong("cachedWeatherSavedAt", 0L)
+        val cachedWeatherIsStale = cacheAgeMs > BackgroundIntervalMs
 
         if (homePlace != null) {
             weatherState = runCatching {
@@ -251,7 +253,7 @@ private fun WeatherApp() {
             lon
         ) > 2_000f
 
-        if (shouldFetchCheckedLocation || previousState !is WeatherState.Ready) {
+        if (shouldFetchCheckedLocation || cachedWeatherIsStale || previousState !is WeatherState.Ready) {
             weatherState = runCatching { fetchWeather(lat, lon, fallback, locationLabel, temperatureUnit = temperatureUnit, cachePrefs = prefs) }
                 .onSuccess {
                     if (point != null) {
@@ -1145,6 +1147,7 @@ private suspend fun fetchWeather(
         ?.putBoolean("cachedWeatherFallback", fallback)
         ?.putString("cachedWeatherLocation", locationLabel)
         ?.putString("cachedWeatherUnit", unit)
+        ?.putLong("cachedWeatherSavedAt", System.currentTimeMillis())
         ?.apply()
     parseWeatherBody(body, fallback, locationLabel, unit)
 }
