@@ -425,7 +425,7 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
     val scope = rememberCoroutineScope()
 
     DisposableEffect(page, selectedDay) {
-        GestureRouter.onSwipe = { dx, dy, _, _ ->
+        GestureRouter.onSwipe = { dx, dy, _, startY ->
             if (page == 0 && selectedDay == null && dy > 170f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
                 if (!refreshing) {
                     refreshing = true
@@ -437,7 +437,7 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
                 }
             } else if (page == 0 && selectedDay == null && dy < -120f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
                 page = 1
-            } else if (page == 0 && selectedDay == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
+            } else if (page == 0 && selectedDay == null && startY < 720f && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 110f) {
                 if (dx < 0f) onPaneChange(AppPane.Settings)
                 if (dx > 0f) onPaneChange(AppPane.Search)
             } else if (page == 1 && selectedDay != null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) {
@@ -570,7 +570,9 @@ private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Uni
         }
         Spacer(Modifier.height(14.dp))
         if (hours.isEmpty()) {
-            CenterMessage("no hourly data")
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                TextLine("no hourly data", size = 14, color = Rule)
+            }
         } else {
             Column(
                 modifier = Modifier
