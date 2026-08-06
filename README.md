@@ -9,8 +9,8 @@ It uses Open-Meteo for weather and geocoding, keeps the interface black-and-whit
 ## Features
 
 - Current conditions with animated monochrome glyphs
-- 12-hour forecast in three instant-swipe pages of four hours
-- 10-day forecast in two instant-swipe pages of five days
+- Scrollable hourly forecast strip
+- Scrollable 10-day forecast with per-day hourly detail
 - Place search using Open-Meteo geocoding
 - Configurable home location
 - Optional 10-minute background weather checks
@@ -21,8 +21,10 @@ It uses Open-Meteo for weather and geocoding, keeps the interface black-and-whit
 
 - Pull down on home: refresh
 - Swipe up from home: 10-day forecast
-- Swipe down from first 10-day page: home
-- Swipe left/right on hourly forecast: next/previous 4-hour pane
+- Swipe right from 10-day: home
+- Scroll the hourly strip on home
+- Tap a day for that day's hourly forecast (scroll)
+- Swipe right from day detail: back to 10-day
 - Swipe right from home: search
 - Swipe left from home: settings
 

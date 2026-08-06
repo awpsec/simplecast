@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -68,6 +69,8 @@ import androidx.compose.ui.unit.Density
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -90,6 +93,13 @@ private val Rule = Color(0xFF5E5A52)
 private val PreviewWeatherCode: Int? = null
 private const val BackgroundCheckAction = "com.awper.lightweather.BACKGROUND_CHECK"
 private const val BackgroundIntervalMs = 10 * 60 * 1000L
+private const val CacheFreshMs = 10 * 60 * 1000L
+private const val CacheDisplayMaxMs = 45 * 60 * 1000L
+private const val HttpConnectTimeoutMs = 2_500
+private const val HttpReadTimeoutMs = 3_500
+private const val LocationTimeoutMs = 700L
+private const val DefaultLatitude = 42.3601
+private const val DefaultLongitude = -71.0589
 
 class MainActivity : ComponentActivity() {
     private var touchStartX = 0f
@@ -140,8 +150,8 @@ class BackgroundCheckReceiver : BroadcastReceiver() {
                 val prefs = context.getSharedPreferences("simplecast", Context.MODE_PRIVATE)
                 if (!prefs.getBoolean("allowBackground", false)) return@Thread
                 val home = prefs.savedPlace("home")
-                val lat = home?.latitude ?: 42.3601
-                val lon = home?.longitude ?: -71.0589
+                val lat = home?.latitude ?: DefaultLatitude
+                val lon = home?.longitude ?: DefaultLongitude
                 runBackgroundWeatherCheck(lat, lon)
                 prefs.edit().putLong("lastBackgroundCheck", System.currentTimeMillis()).apply()
                 setBackgroundChecks(context, true)
@@ -178,9 +188,7 @@ private fun runBackgroundWeatherCheck(latitude: Double, longitude: Double) {
         "?latitude=$latitude&longitude=$longitude" +
         "&current=temperature_2m,weather_code" +
         "&temperature_unit=fahrenheit&forecast_days=1&timezone=auto"
-    val connection = URL(url).openConnection() as HttpURLConnection
-    connection.connectTimeout = 10_000
-    connection.readTimeout = 10_000
+    val connection = openMeteoConnection(url)
     connection.inputStream.bufferedReader().use { it.readText() }
 }
 
@@ -188,7 +196,9 @@ private fun runBackgroundWeatherCheck(latitude: Double, longitude: Double) {
 private fun WeatherApp() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("simplecast", Context.MODE_PRIVATE) }
-    var weatherState by remember { mutableStateOf(prefs.cachedWeatherState() ?: WeatherState.Loading("finding location")) }
+    var weatherState by remember {
+        mutableStateOf<WeatherState>(prefs.displayCachedWeatherState() ?: WeatherState.Loading("loading weather"))
+    }
     var pane by remember { mutableStateOf(AppPane.Home) }
     var homePlace by remember { mutableStateOf(prefs.savedPlace("home")) }
     var allowBackground by remember { mutableStateOf(prefs.getBoolean("allowBackground", false)) }
@@ -205,7 +215,7 @@ private fun WeatherApp() {
         setBackgroundChecks(context, allowBackground)
     }
 
-    LaunchedEffect(refreshNonce) {
+    LaunchedEffect(refreshNonce, homePlace, temperatureUnit) {
         val hasLocation = context.hasLocationPermission()
         if (!hasLocation) {
             locationLauncher.launch(
@@ -217,54 +227,87 @@ private fun WeatherApp() {
         }
 
         val previousState = weatherState
+        val unit = if (temperatureUnit == "celsius") "celsius" else "fahrenheit"
         val cacheAgeMs = System.currentTimeMillis() - prefs.getLong("cachedWeatherSavedAt", 0L)
-        val cachedWeatherIsStale = cacheAgeMs > BackgroundIntervalMs
+        val cacheUnit = prefs.getString("cachedWeatherUnit", "fahrenheit")
+        val cacheIsFresh = cacheUnit == unit && cacheAgeMs in 0 until CacheFreshMs && previousState is WeatherState.Ready
 
-        if (homePlace != null) {
-            weatherState = runCatching {
-                fetchWeather(homePlace!!.latitude, homePlace!!.longitude, fallback = false, locationLabel = homePlace!!.title.lowercase(), temperatureUnit = temperatureUnit, cachePrefs = prefs)
-            }.getOrElse { error ->
-                if (previousState is WeatherState.Ready) previousState else WeatherState.Error(error.message ?: "weather unavailable")
+        val home = homePlace
+        val lastDevice = prefs.savedPlace("lastDevice")
+        val seedPlace = home ?: lastDevice
+        val seedLat = seedPlace?.latitude ?: DefaultLatitude
+        val seedLon = seedPlace?.longitude ?: DefaultLongitude
+        val seedLabel = seedPlace?.title?.lowercase() ?: "boston"
+        val seedFallback = seedPlace == null
+
+        if (cacheIsFresh && refreshNonce == 0) {
+            if (home == null && hasLocation) {
+                val point = context.bestCurrentPoint()
+                if (point != null) {
+                    val provisional = lastDevice?.title?.lowercase() ?: seedLabel
+                    prefs.edit().putPlace("lastDevice", Place(provisional, point.latitude, point.longitude)).apply()
+                    if (lastDevice == null || distanceMeters(lastDevice.latitude, lastDevice.longitude, point.latitude, point.longitude) > 2_000f) {
+                        weatherState = runCatching {
+                            fetchWeather(point.latitude, point.longitude, fallback = false, locationLabel = provisional, temperatureUnit = temperatureUnit, cachePrefs = prefs)
+                        }.getOrElse { previousState }
+                    }
+                    val label = context.locationLabel(point.latitude, point.longitude) ?: provisional
+                    if (label != provisional) {
+                        prefs.edit().putPlace("lastDevice", Place(label, point.latitude, point.longitude)).apply()
+                        if (weatherState is WeatherState.Ready) {
+                            val ready = weatherState as WeatherState.Ready
+                            weatherState = ready.copy(forecast = ready.forecast.copy(locationLabel = label))
+                        }
+                    }
+                }
             }
             return@LaunchedEffect
         }
 
-        val lastDevicePlace = prefs.savedPlace("lastDevice")
-        if (lastDevicePlace != null && previousState !is WeatherState.Ready) {
-            weatherState = runCatching {
-                fetchWeather(lastDevicePlace.latitude, lastDevicePlace.longitude, fallback = false, locationLabel = lastDevicePlace.title.lowercase(), temperatureUnit = temperatureUnit, cachePrefs = prefs)
-            }.getOrElse { error ->
-                WeatherState.Error(error.message ?: "weather unavailable")
-            }
+        if (previousState !is WeatherState.Ready) {
+            weatherState = WeatherState.Loading("loading weather")
         }
 
-        val point = if (hasLocation) context.bestCurrentPoint() else null
-        val fallback = point == null && lastDevicePlace == null
-        val lat = point?.latitude ?: lastDevicePlace?.latitude ?: 42.3601
-        val lon = point?.longitude ?: lastDevicePlace?.longitude ?: -71.0589
-        val locationLabel = point?.let { context.locationLabel(it.latitude, it.longitude) }
-            ?: lastDevicePlace?.title?.lowercase()
-            ?: "boston"
+        coroutineScope {
+            val immediateFetch = async {
+                runCatching {
+                    fetchWeather(seedLat, seedLon, seedFallback, seedLabel, temperatureUnit = temperatureUnit, cachePrefs = prefs)
+                }
+            }
+            val locationFetch = async {
+                if (home == null && hasLocation) context.bestCurrentPoint() else null
+            }
 
-        val shouldFetchCheckedLocation = point == null || lastDevicePlace == null || distanceMeters(
-            lastDevicePlace.latitude,
-            lastDevicePlace.longitude,
-            lat,
-            lon
-        ) > 2_000f
+            val immediate = immediateFetch.await()
+            weatherState = immediate.getOrElse { error ->
+                if (previousState is WeatherState.Ready) previousState
+                else WeatherState.Error(error.message ?: "weather unavailable")
+            }
 
-        if (shouldFetchCheckedLocation || cachedWeatherIsStale || previousState !is WeatherState.Ready) {
-            weatherState = runCatching { fetchWeather(lat, lon, fallback, locationLabel, temperatureUnit = temperatureUnit, cachePrefs = prefs) }
-                .onSuccess {
-                    if (point != null) {
-                        prefs.edit().putPlace("lastDevice", Place(locationLabel, point.latitude, point.longitude)).apply()
+            val point = locationFetch.await()
+            if (point != null && home == null) {
+                val movedFar = lastDevice == null || distanceMeters(
+                    lastDevice.latitude,
+                    lastDevice.longitude,
+                    point.latitude,
+                    point.longitude
+                ) > 2_000f
+                val provisional = lastDevice?.title?.lowercase() ?: "current location"
+                prefs.edit().putPlace("lastDevice", Place(provisional, point.latitude, point.longitude)).apply()
+                if (movedFar || seedFallback) {
+                    weatherState = runCatching {
+                        fetchWeather(point.latitude, point.longitude, fallback = false, locationLabel = provisional, temperatureUnit = temperatureUnit, cachePrefs = prefs)
+                    }.getOrElse { weatherState }
+                }
+                val label = context.locationLabel(point.latitude, point.longitude) ?: provisional
+                if (label != provisional) {
+                    prefs.edit().putPlace("lastDevice", Place(label, point.latitude, point.longitude)).apply()
+                    if (weatherState is WeatherState.Ready) {
+                        val ready = weatherState as WeatherState.Ready
+                        weatherState = ready.copy(forecast = ready.forecast.copy(locationLabel = label))
                     }
                 }
-                .getOrElse { error ->
-                    if (weatherState is WeatherState.Ready) weatherState else WeatherState.Error(error.message ?: "weather unavailable")
-                }
-        } else if (point != null) {
-            prefs.edit().putPlace("lastDevice", Place(locationLabel, point.latitude, point.longitude)).apply()
+            }
         }
     }
 
@@ -365,6 +408,8 @@ private fun IntroPopup(onDismiss: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             TextLine("swipe right for lookups", size = 18)
             Spacer(Modifier.height(12.dp))
+            TextLine("swipe up for 10 day", size = 18)
+            Spacer(Modifier.height(12.dp))
             TextLine("enjoy your day!", size = 18)
             Spacer(Modifier.height(26.dp))
             TextLine("tap anywhere", size = 12, color = Rule)
@@ -375,53 +420,30 @@ private fun IntroPopup(onDismiss: () -> Unit) {
 @Composable
 private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (AppPane) -> Unit) {
     var page by remember { mutableStateOf(0) }
-    var hourPage by remember(forecast.hours) { mutableStateOf(0) }
-    var dayPage by remember(forecast.days) { mutableStateOf(0) }
     var selectedDay by remember(forecast.days) { mutableStateOf<LocalDate?>(null) }
     var refreshing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val hourPageCount = forecast.hours.chunked(4).size.coerceAtLeast(1)
-    val dayPageCount = forecast.days.take(10).chunked(5).size.coerceAtLeast(1)
 
-    DisposableEffect(page, hourPage, dayPage, selectedDay, hourPageCount, dayPageCount) {
-        GestureRouter.onSwipe = { dx, dy, _, startY ->
-            if (page == 0 && dy > 170f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
+    DisposableEffect(page, selectedDay) {
+        GestureRouter.onSwipe = { dx, dy, _, _ ->
+            if (page == 0 && selectedDay == null && dy > 170f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
                 if (!refreshing) {
                     refreshing = true
+                    onRetry()
                     scope.launch {
-                        delay(1_650)
-                        onRetry()
-                        delay(350)
+                        delay(420)
                         refreshing = false
                     }
                 }
-            } else if (kotlin.math.abs(dy) > kotlin.math.abs(dx) && kotlin.math.abs(dy) > 120f) {
-                if (page == 0 && dy < 0f) {
-                    page = 1
-                } else if (page == 1 && selectedDay == null && dy < 0f && dayPage < dayPageCount - 1) {
-                    dayPage++
-                } else if (page == 1 && selectedDay == null && dy > 0f && dayPage > 0) {
-                    dayPage--
-                } else if (page == 1 && selectedDay == null && dy > 0f) {
-                    page = 0
-                }
-            }
-            if (page == 0 && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
-                if (startY > 820f) {
-                    if (dx < 0f && hourPage < hourPageCount - 1) hourPage++
-                    if (dx > 0f && hourPage > 0) hourPage--
-                } else {
-                    if (dx < 0f) onPaneChange(AppPane.Settings)
-                    if (dx > 0f) onPaneChange(AppPane.Search)
-                }
-            }
-            if (page == 1 && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
-                if (selectedDay != null) {
-                    if (dx > 0f) selectedDay = null
-                } else {
-                    if (dx < 0f && dayPage < dayPageCount - 1) dayPage++
-                    if (dx > 0f && dayPage > 0) dayPage--
-                }
+            } else if (page == 0 && selectedDay == null && dy < -120f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
+                page = 1
+            } else if (page == 0 && selectedDay == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
+                if (dx < 0f) onPaneChange(AppPane.Settings)
+                if (dx > 0f) onPaneChange(AppPane.Search)
+            } else if (page == 1 && selectedDay != null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) {
+                selectedDay = null
+            } else if (page == 1 && selectedDay == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) {
+                page = 0
             }
         }
         GestureRouter.onMove = { _, _ -> }
@@ -440,15 +462,21 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
         PullDots(visible = refreshing)
 
         if (page == 0) {
-            CurrentAndHourlyPage(forecast, hourPage)
+            CurrentAndHourlyPage(forecast)
         } else {
-            TenDayPage(forecast, dayPage, selectedDay, onSelectDay = { selectedDay = it }, onBack = { selectedDay = null })
+            TenDayPage(
+                forecast = forecast,
+                selectedDay = selectedDay,
+                onSelectDay = { selectedDay = it },
+                onBackToHome = { page = 0 },
+                onBackFromDay = { selectedDay = null }
+            )
         }
     }
 }
 
 @Composable
-private fun CurrentAndHourlyPage(forecast: Forecast, hourPage: Int) {
+private fun CurrentAndHourlyPage(forecast: Forecast, showTenDayHint: Boolean = true) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(22.dp))
         val displayCode = PreviewWeatherCode ?: forecast.current.displayCode
@@ -465,70 +493,101 @@ private fun CurrentAndHourlyPage(forecast: Forecast, hourPage: Int) {
         Spacer(Modifier.height(24.dp))
         TextLine("hourly", size = 14, color = Rule)
         Spacer(Modifier.height(12.dp))
-        HourlyPager(forecast.hours, hourPage, forecast.unitSymbol)
+        HourlyStrip(forecast.hours, forecast.unitSymbol)
+        if (showTenDayHint) {
+            Spacer(Modifier.height(28.dp))
+            TextLine("swipe up for 10 day", size = 12, color = Rule)
+            Spacer(Modifier.height(18.dp))
+        }
     }
 }
 
 @Composable
 private fun TenDayPage(
     forecast: Forecast,
-    dayPage: Int,
     selectedDay: LocalDate?,
     onSelectDay: (LocalDate) -> Unit,
-    onBack: () -> Unit
+    onBackToHome: () -> Unit,
+    onBackFromDay: () -> Unit
 ) {
     if (selectedDay != null) {
-        DayHourlyPage(forecast, selectedDay, onBack)
+        DayHourlyPage(forecast, selectedDay, onBackFromDay)
         return
     }
 
-    val pages = forecast.days.take(10).chunked(5).ifEmpty { listOf(emptyList()) }
-    val safePage = dayPage.coerceIn(0, pages.lastIndex)
-
     Column(
-        modifier = Modifier
-            .fillMaxSize(),
+        modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(Modifier.height(10.dp))
+        TopArrow(onBackToHome)
         TextLine("10 day", size = 12, color = Rule)
         Spacer(Modifier.height(10.dp))
-        pages[safePage].forEach { day ->
-            ForecastRow(
-                left = formatDay(day.date),
-                code = day.code,
-                right = "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}",
-                onClick = { onSelectDay(day.date) }
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        TextLine("${safePage + 1}/${pages.size}", size = 12, color = Rule)
-    }
-}
-
-@Composable
-private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Unit) {
-    val hours = forecast.allHours.filter { it.time.toLocalDate() == date }
-    Column(
-        modifier = Modifier
-            .fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        TopArrow(onBack)
-        TextLine(formatDay(date).lowercase(), size = 18)
-        Spacer(Modifier.height(12.dp))
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
         ) {
-            hours.forEach { hour ->
+            forecast.days.take(10).forEach { day ->
                 ForecastRow(
-                    left = formatHour(hour.time).lowercase(),
-                    code = hour.code,
-                    right = formatTemp(hour.temperature, forecast.unitSymbol)
+                    left = formatDay(day.date),
+                    code = day.code,
+                    right = "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}",
+                    onClick = { onSelectDay(day.date) }
                 )
+            }
+            Spacer(Modifier.height(18.dp))
+            TextLine("tap a day for hourly", size = 12, color = Rule)
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Unit) {
+    val day = forecast.days.firstOrNull { it.date == date }
+    val hours = forecast.allHours.filter { it.time.toLocalDate() == date }
+    val now = LocalDateTime.now()
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        TopArrow(onBack)
+        TextLine(formatDay(date).lowercase(), size = 18)
+        if (day != null) {
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                WeatherGlyph(day.code, Modifier.size(28.dp), animated = false)
+                Spacer(Modifier.width(12.dp))
+                TextLine(
+                    "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}",
+                    size = 16
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            TextLine(weatherLabel(day.code), size = 13, color = Rule)
+        }
+        Spacer(Modifier.height(14.dp))
+        if (hours.isEmpty()) {
+            CenterMessage("no hourly data")
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                hours.forEach { hour ->
+                    val isNow = date == now.toLocalDate() && hour.time.hour == now.hour
+                    ForecastRow(
+                        left = formatHour(hour.time).lowercase(),
+                        code = hour.code,
+                        right = formatTemp(hour.temperature, forecast.unitSymbol),
+                        emphasized = isNow
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
             }
         }
     }
@@ -540,21 +599,14 @@ private fun SearchPane(temperatureUnit: String, onClose: () -> Unit) {
     var places by remember { mutableStateOf(emptyList<Place>()) }
     var selectedPlace by remember { mutableStateOf<Place?>(null) }
     var selectedState by remember { mutableStateOf<WeatherState?>(null) }
-    var selectedHourPage by remember { mutableStateOf(0) }
-    val selectedHourPageCount = (selectedState as? WeatherState.Ready)
-        ?.forecast
-        ?.hours
-        ?.chunked(4)
-        ?.size
-        ?.coerceAtLeast(1) ?: 1
 
-    DisposableEffect(selectedPlace, selectedHourPage, selectedHourPageCount) {
+    DisposableEffect(selectedPlace) {
         GestureRouter.onSwipe = { dx, dy, _, _ ->
             if (selectedPlace == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx < -90f) {
                 onClose()
-            } else if (selectedPlace != null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 90f) {
-                if (dx < 0f && selectedHourPage < selectedHourPageCount - 1) selectedHourPage++
-                if (dx > 0f && selectedHourPage > 0) selectedHourPage--
+            } else if (selectedPlace != null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) {
+                selectedPlace = null
+                selectedState = null
             }
         }
         GestureRouter.onMove = { _, _ -> }
@@ -582,10 +634,16 @@ private fun SearchPane(temperatureUnit: String, onClose: () -> Unit) {
 
     LaunchedEffect(selectedPlace) {
         val place = selectedPlace ?: return@LaunchedEffect
-        selectedHourPage = 0
         selectedState = WeatherState.Loading("loading weather")
-        selectedState = runCatching { fetchWeather(place.latitude, place.longitude, fallback = false, locationLabel = place.title.lowercase(), temperatureUnit = temperatureUnit) }
-            .getOrElse { WeatherState.Error(it.message ?: "weather unavailable") }
+        selectedState = runCatching {
+            fetchWeather(
+                place.latitude,
+                place.longitude,
+                fallback = false,
+                locationLabel = place.title.lowercase(),
+                temperatureUnit = temperatureUnit
+            )
+        }.getOrElse { WeatherState.Error(it.message ?: "weather unavailable") }
     }
 
     if (selectedPlace != null) {
@@ -594,7 +652,7 @@ private fun SearchPane(temperatureUnit: String, onClose: () -> Unit) {
             TextLine(selectedPlace!!.title.lowercase(), size = 18)
             Spacer(Modifier.height(18.dp))
             when (val state = selectedState) {
-                is WeatherState.Ready -> SearchForecast(state.forecast, selectedHourPage)
+                is WeatherState.Ready -> SearchForecast(state.forecast)
                 is WeatherState.Error -> CenterMessage("weather unavailable")
                 else -> CenterMessage("loading weather")
             }
@@ -701,20 +759,25 @@ private fun SettingsPane(
 }
 
 @Composable
-private fun SearchForecast(forecast: Forecast, hourPage: Int) {
+private fun SearchForecast(forecast: Forecast) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        CurrentAndHourlyPage(forecast, hourPage = hourPage)
+        CurrentAndHourlyPage(forecast, showTenDayHint = false)
         Spacer(Modifier.height(28.dp))
         TextLine("10 day", size = 12, color = Rule)
         Spacer(Modifier.height(10.dp))
         forecast.days.take(10).forEach { day ->
-            ForecastRow(formatDay(day.date), day.code, "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}")
+            ForecastRow(
+                formatDay(day.date),
+                day.code,
+                "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}"
+            )
         }
+        Spacer(Modifier.height(20.dp))
     }
 }
 
@@ -823,30 +886,26 @@ private fun PullDots(visible: Boolean) {
 }
 
 @Composable
-private fun HourlyPager(hours: List<HourForecast>, hourPage: Int, unitSymbol: String) {
-    val pages = hours.chunked(4).ifEmpty { listOf(emptyList()) }
-    val safePage = hourPage.coerceIn(0, pages.lastIndex)
-
+private fun HourlyStrip(hours: List<HourForecast>, unitSymbol: String) {
+    if (hours.isEmpty()) {
+        TextLine("no hourly data", size = 13, color = Rule)
+        return
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(118.dp),
+            .horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        pages[safePage].forEachIndexed { index, hour ->
+        hours.forEachIndexed { index, hour ->
             HourCard(
                 hour = hour,
-                isCurrent = safePage == 0 && index == 0,
+                isCurrent = index == 0,
                 unitSymbol = unitSymbol,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.width(72.dp)
             )
         }
-        repeat(4 - pages[safePage].size) {
-            Spacer(Modifier.weight(1f))
-        }
     }
-    Spacer(Modifier.height(12.dp))
-    TextLine("${safePage + 1}/${pages.size}", size = 12, color = Rule)
 }
 
 @Composable
@@ -868,11 +927,17 @@ private fun HourCard(hour: HourForecast, isCurrent: Boolean, unitSymbol: String,
 }
 
 @Composable
-private fun ForecastRow(left: String, code: Int, right: String, onClick: (() -> Unit)? = null) {
+private fun ForecastRow(
+    left: String,
+    code: Int,
+    right: String,
+    onClick: (() -> Unit)? = null,
+    emphasized: Boolean = false
+) {
     val rowModifier = Modifier
         .fillMaxWidth()
         .height(52.dp)
-        .border(1.dp, Rule)
+        .border(if (emphasized) 2.dp else 1.dp, if (emphasized) Ink else Rule)
         .then(if (onClick == null) Modifier else Modifier.clickable { onClick() })
         .padding(horizontal = 20.dp)
     Row(
@@ -1122,6 +1187,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSleet(width: Fl
     drawSnow(width * 0.95f, (phase + 0.38f) % 1f)
 }
 
+private fun openMeteoConnection(url: String): HttpURLConnection {
+    val connection = URL(url).openConnection() as HttpURLConnection
+    connection.connectTimeout = HttpConnectTimeoutMs
+    connection.readTimeout = HttpReadTimeoutMs
+    connection.setRequestProperty("Accept", "application/json")
+    return connection
+}
+
 private suspend fun fetchWeather(
     latitude: Double,
     longitude: Double,
@@ -1137,9 +1210,7 @@ private suspend fun fetchWeather(
         "&hourly=temperature_2m,weather_code" +
         "&daily=weather_code,temperature_2m_max,temperature_2m_min" +
         "&temperature_unit=$unit&forecast_days=10&timezone=auto"
-    val connection = URL(url).openConnection() as HttpURLConnection
-    connection.connectTimeout = 10_000
-    connection.readTimeout = 10_000
+    val connection = openMeteoConnection(url)
 
     val body = connection.inputStream.bufferedReader().use { it.readText() }
     cachePrefs?.edit()
@@ -1152,13 +1223,20 @@ private suspend fun fetchWeather(
     parseWeatherBody(body, fallback, locationLabel, unit)
 }
 
-private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: String, temperatureUnit: String): WeatherState.Ready {
+private fun parseWeatherBody(
+    body: String,
+    fallback: Boolean,
+    locationLabel: String,
+    temperatureUnit: String,
+    referenceNow: LocalDateTime? = null
+): WeatherState.Ready {
     val json = JSONObject(body)
     val currentJson = json.getJSONObject("current")
     val hourlyJson = json.getJSONObject("hourly")
     val dailyJson = json.getJSONObject("daily")
 
-    val now = LocalDateTime.parse(currentJson.getString("time"))
+    val apiNow = LocalDateTime.parse(currentJson.getString("time"))
+    val now = referenceNow ?: apiNow
     val hours = mutableListOf<HourForecast>()
     val allHours = mutableListOf<HourForecast>()
     val hourTimes = hourlyJson.getJSONArray("time")
@@ -1167,9 +1245,9 @@ private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: Str
     for (i in 0 until hourTimes.length()) {
         val time = LocalDateTime.parse(hourTimes.getString(i))
         val hour = HourForecast(time, hourTemps.getDouble(i), hourCodes.getInt(i))
-        if (!time.isBefore(now)) {
-            allHours += hour
-            if (hours.size < 16) hours += hour
+        allHours += hour
+        if (!time.isBefore(now) && hours.size < 16) {
+            hours += hour
         }
     }
 
@@ -1202,9 +1280,7 @@ private fun parseWeatherBody(body: String, fallback: Boolean, locationLabel: Str
 private suspend fun searchPlaces(query: String): List<Place> = withContext(Dispatchers.IO) {
     val encoded = URLEncoder.encode(query, "UTF-8")
     val url = "https://geocoding-api.open-meteo.com/v1/search?name=$encoded&count=25&language=en&format=json"
-    val connection = URL(url).openConnection() as HttpURLConnection
-    connection.connectTimeout = 10_000
-    connection.readTimeout = 10_000
+    val connection = openMeteoConnection(url)
     val body = connection.inputStream.bufferedReader().use { it.readText() }
     val results = JSONObject(body).optJSONArray("results") ?: return@withContext emptyList()
     buildList {
@@ -1228,12 +1304,24 @@ private fun SharedPreferences.savedPlace(prefix: String): Place? {
     )
 }
 
-private fun SharedPreferences.cachedWeatherState(): WeatherState.Ready? {
+private fun SharedPreferences.displayCachedWeatherState(): WeatherState.Ready? {
+    val savedAt = getLong("cachedWeatherSavedAt", 0L)
+    if (savedAt <= 0L) return null
+    val ageMs = System.currentTimeMillis() - savedAt
+    if (ageMs !in 0 until CacheDisplayMaxMs) return null
+
     val body = getString("cachedWeatherBody", null) ?: return null
     val fallback = getBoolean("cachedWeatherFallback", false)
     val location = getString("cachedWeatherLocation", null) ?: return null
     val unit = getString("cachedWeatherUnit", "fahrenheit") ?: "fahrenheit"
-    return runCatching { parseWeatherBody(body, fallback, location, unit) }.getOrNull()
+    val parsed = runCatching {
+        parseWeatherBody(body, fallback, location, unit, referenceNow = LocalDateTime.now())
+    }.getOrNull() ?: return null
+
+    val today = LocalDate.now()
+    val coversToday = parsed.forecast.days.any { !it.date.isBefore(today) }
+    if (!coversToday || parsed.forecast.hours.isEmpty()) return null
+    return parsed
 }
 
 private fun SharedPreferences.Editor.putPlace(prefix: String, place: Place?): SharedPreferences.Editor {
@@ -1267,7 +1355,7 @@ private suspend fun Context.bestCurrentPoint(): Location? {
         .firstOrNull { runCatching { manager.isProviderEnabled(it) }.getOrDefault(false) }
         ?: return lastKnown
     return runCatching {
-        withTimeoutOrNull(2_500) {
+        withTimeoutOrNull(LocationTimeoutMs) {
             suspendCancellableCoroutine<Location?> { continuation ->
             val cancellationSignal = CancellationSignal()
             manager.getCurrentLocation(provider, cancellationSignal, mainExecutor) { location ->
