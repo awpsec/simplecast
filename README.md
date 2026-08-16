@@ -19,14 +19,14 @@ It uses Open-Meteo for weather and geocoding, keeps the interface black-and-whit
 
 ## Gestures
 
-- Pull down on home: refresh
-- Swipe up from home: 10-day forecast
-- Swipe right from 10-day: home
+- Pull down on home: refresh (follows your finger)
+- Swipe up from home: 10-day forecast slides in
+- Swipe right from 10-day: home slides back
 - Scroll the hourly strip on home
-- Tap a day for that day's hourly forecast (scroll)
+- Tap a day: that day's hourly forecast slides in
 - Swipe right from day detail: back to 10-day
-- Swipe right from home: search
-- Swipe left from home: settings
+- Swipe right from home: search slides in
+- Swipe left from home: settings slides in
 
 ## Build
 

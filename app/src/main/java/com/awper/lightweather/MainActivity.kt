@@ -20,13 +20,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,11 +41,13 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -49,48 +56,48 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.Density
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.net.HttpURLConnection
-import java.net.URLEncoder
 import java.net.URL
+import java.net.URLEncoder
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import kotlin.math.roundToInt
 import kotlin.coroutines.resume
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private val Ink = Color(0xFFE8E4DC)
 private val Paper = Color.Black
 private val Rule = Color(0xFF5E5A52)
-private val PreviewWeatherCode: Int? = null
 private const val BackgroundCheckAction = "com.awper.lightweather.BACKGROUND_CHECK"
 private const val BackgroundIntervalMs = 10 * 60 * 1000L
 private const val CacheFreshMs = 10 * 60 * 1000L
@@ -100,6 +107,12 @@ private const val HttpReadTimeoutMs = 3_500
 private const val LocationTimeoutMs = 700L
 private const val DefaultLatitude = 42.3601
 private const val DefaultLongitude = -71.0589
+private const val DragSlopPx = 24f
+private const val SettleThreshold = 0.18f
+private val SlideSpec = tween<Float>(durationMillis = 300, easing = FastOutSlowInEasing)
+
+private enum class DragAxis { None, Horizontal, Vertical }
+private enum class DragMode { None, Pane, VerticalHome, DayBack, TenDayBack }
 
 class MainActivity : ComponentActivity() {
     private var touchStartX = 0f
@@ -121,13 +134,16 @@ class MainActivity : ComponentActivity() {
             MotionEvent.ACTION_DOWN -> {
                 touchStartX = event.x
                 touchStartY = event.y
-            }
-            MotionEvent.ACTION_UP -> {
-                GestureRouter.onSwipe?.invoke(event.x - touchStartX, event.y - touchStartY, touchStartX, touchStartY)
-                GestureRouter.onMove?.invoke(0f, 0f)
+                GestureRouter.onDown?.invoke()
             }
             MotionEvent.ACTION_MOVE -> {
-                GestureRouter.onMove?.invoke(event.x - touchStartX, event.y - touchStartY)
+                GestureRouter.onDrag?.invoke(event.x - touchStartX, event.y - touchStartY, touchStartY)
+            }
+            MotionEvent.ACTION_UP -> {
+                GestureRouter.onRelease?.invoke(event.x - touchStartX, event.y - touchStartY, touchStartY)
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                GestureRouter.onCancel?.invoke()
             }
         }
         return super.dispatchTouchEvent(event)
@@ -135,11 +151,11 @@ class MainActivity : ComponentActivity() {
 }
 
 private object GestureRouter {
-    var onSwipe: ((dx: Float, dy: Float, startX: Float, startY: Float) -> Unit)? = null
-    var onMove: ((dx: Float, dy: Float) -> Unit)? = null
+    var onDown: (() -> Unit)? = null
+    var onDrag: ((dx: Float, dy: Float, startY: Float) -> Unit)? = null
+    var onRelease: ((dx: Float, dy: Float, startY: Float) -> Unit)? = null
+    var onCancel: (() -> Unit)? = null
 }
-
-private enum class AppPane { Search, Home, Settings }
 
 class BackgroundCheckReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -192,6 +208,26 @@ private fun runBackgroundWeatherCheck(latitude: Double, longitude: Double) {
     connection.inputStream.bufferedReader().use { it.readText() }
 }
 
+private suspend fun animateFloat(from: Float, to: Float, onValue: (Float) -> Unit) {
+    if (abs(from - to) < 0.001f) {
+        onValue(to)
+        return
+    }
+    animate(initialValue = from, targetValue = to, animationSpec = SlideSpec) { value, _ ->
+        onValue(value)
+    }
+}
+
+private fun settleStep(rest: Float, current: Float, min: Float, max: Float): Float {
+    val delta = current - rest
+    val stepped = when {
+        delta <= -SettleThreshold -> rest - 1f
+        delta >= SettleThreshold -> rest + 1f
+        else -> rest
+    }
+    return stepped.coerceIn(min, max)
+}
+
 @Composable
 private fun WeatherApp() {
     val context = LocalContext.current
@@ -199,7 +235,6 @@ private fun WeatherApp() {
     var weatherState by remember {
         mutableStateOf<WeatherState>(prefs.displayCachedWeatherState() ?: WeatherState.Loading("loading weather"))
     }
-    var pane by remember { mutableStateOf(AppPane.Home) }
     var homePlace by remember { mutableStateOf(prefs.savedPlace("home")) }
     var allowBackground by remember { mutableStateOf(prefs.getBoolean("allowBackground", false)) }
     var temperatureUnit by remember { mutableStateOf(prefs.getString("temperatureUnit", "fahrenheit") ?: "fahrenheit") }
@@ -313,12 +348,10 @@ private fun WeatherApp() {
 
     WeatherScreen(
         weatherState = weatherState,
-        pane = pane,
         allowBackground = allowBackground,
         homePlace = homePlace,
         temperatureUnit = temperatureUnit,
         showIntro = showIntro,
-        onPaneChange = { pane = it },
         onRetry = { refreshNonce++ },
         onAllowBackgroundChange = {
             allowBackground = it
@@ -345,44 +378,259 @@ private fun WeatherApp() {
 @Composable
 private fun WeatherScreen(
     weatherState: WeatherState,
-    pane: AppPane,
     allowBackground: Boolean,
     homePlace: Place?,
     temperatureUnit: String,
     showIntro: Boolean,
-    onPaneChange: (AppPane) -> Unit,
     onRetry: () -> Unit,
     onAllowBackgroundChange: (Boolean) -> Unit,
     onHomePlaceChange: (Place?) -> Unit,
     onTemperatureUnitChange: (String) -> Unit,
     onIntroDismiss: () -> Unit
 ) {
-    Box(
+    val scope = rememberCoroutineScope()
+    var panePos by remember { mutableStateOf(1f) }
+    var verticalPos by remember { mutableStateOf(0f) }
+    var dayPos by remember { mutableStateOf(0f) }
+    var pullPx by remember { mutableStateOf(0f) }
+    var selectedDay by remember { mutableStateOf<LocalDate?>(null) }
+    var visibleDay by remember { mutableStateOf<LocalDate?>(null) }
+    var refreshing by remember { mutableStateOf(false) }
+    var dragAxis by remember { mutableStateOf(DragAxis.None) }
+    var dragMode by remember { mutableStateOf(DragMode.None) }
+    var restPane by remember { mutableStateOf(1f) }
+    var restVertical by remember { mutableStateOf(0f) }
+    var restDay by remember { mutableStateOf(0f) }
+    var animationJob by remember { mutableStateOf<Job?>(null) }
+    val weatherStateRef = rememberUpdatedState(weatherState)
+    val onRetryRef = rememberUpdatedState(onRetry)
+
+    fun runAnim(block: suspend () -> Unit) {
+        animationJob?.cancel()
+        animationJob = scope.launch {
+            try {
+                block()
+            } catch (_: CancellationException) {
+            }
+        }
+    }
+
+    fun goToPane(target: Float) {
+        val start = panePos
+        runAnim { animateFloat(start, target) { panePos = it } }
+    }
+
+    fun goToVertical(target: Float) {
+        val start = verticalPos
+        runAnim { animateFloat(start, target) { verticalPos = it } }
+    }
+
+    fun openDay(date: LocalDate) {
+        selectedDay = date
+        visibleDay = date
+        val start = dayPos
+        runAnim { animateFloat(start, 1f) { dayPos = it } }
+    }
+
+    fun closeDay() {
+        val start = dayPos
+        runAnim {
+            animateFloat(start, 0f) { dayPos = it }
+            selectedDay = null
+            visibleDay = null
+        }
+    }
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Paper)
-            .padding(
-                horizontal = if (pane == AppPane.Home) 44.dp else 28.dp,
-                vertical = if (pane == AppPane.Home) 22.dp else 0.dp
-            )
+            .clipToBounds()
     ) {
-        when (pane) {
-            AppPane.Search -> SearchPane(temperatureUnit = temperatureUnit, onClose = { onPaneChange(AppPane.Home) })
-            AppPane.Settings -> SettingsPane(
+        val pageWidth = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+        val pageHeight = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+        val headerLimit = pageHeight * 0.45f
+
+        DisposableEffect(pageWidth, pageHeight) {
+            GestureRouter.onDown = {
+                animationJob?.cancel()
+                dragAxis = DragAxis.None
+                dragMode = DragMode.None
+            }
+            GestureRouter.onDrag = drag@{ dx, dy, startY ->
+                if (dragAxis == DragAxis.None) {
+                    if (abs(dx) < DragSlopPx && abs(dy) < DragSlopPx) return@drag
+                    restPane = panePos
+                    restVertical = verticalPos
+                    restDay = dayPos
+                    dragAxis = if (abs(dx) > abs(dy)) DragAxis.Horizontal else DragAxis.Vertical
+                    val onHome = restPane > 0.5f && restPane < 1.5f
+                    dragMode = if (dragAxis == DragAxis.Horizontal) {
+                        when {
+                            onHome && restVertical > 0.5f && visibleDay != null && restDay > 0.05f -> DragMode.DayBack
+                            onHome && restVertical > 0.5f -> DragMode.TenDayBack
+                            onHome && restVertical < 0.5f && startY > headerLimit && weatherStateRef.value is WeatherState.Ready -> DragMode.None
+                            else -> DragMode.Pane
+                        }
+                    } else {
+                        if (onHome && restVertical < 0.5f && visibleDay == null) DragMode.VerticalHome else DragMode.None
+                    }
+                }
+
+                when (dragMode) {
+                    DragMode.Pane -> {
+                        val min = (restPane - 1f).coerceAtLeast(0f)
+                        val max = (restPane + 1f).coerceAtMost(2f)
+                        panePos = (restPane - dx / pageWidth).coerceIn(min, max)
+                    }
+                    DragMode.VerticalHome -> {
+                        if (dy > 0f && restVertical < 0.02f) {
+                            pullPx = (dy * 0.28f).coerceIn(0f, 110f)
+                            verticalPos = 0f
+                        } else {
+                            pullPx = 0f
+                            verticalPos = (restVertical - dy / pageHeight).coerceIn(0f, 1f)
+                        }
+                    }
+                    DragMode.DayBack -> {
+                        dayPos = (1f - (dx / pageWidth).coerceAtLeast(0f)).coerceIn(0f, 1f)
+                    }
+                    DragMode.TenDayBack -> {
+                        verticalPos = (1f - (dx / pageWidth).coerceAtLeast(0f)).coerceIn(0f, 1f)
+                    }
+                    DragMode.None -> Unit
+                }
+            }
+            GestureRouter.onRelease = { dx, dy, _ ->
+                val mode = dragMode
+                dragAxis = DragAxis.None
+                dragMode = DragMode.None
+                when (mode) {
+                    DragMode.Pane -> {
+                        val target = settleStep(restPane, panePos, 0f, 2f)
+                        goToPane(target)
+                    }
+                    DragMode.VerticalHome -> {
+                        val shouldRefresh = pullPx > 52f || dy > 150f
+                        val pullStart = pullPx
+                        val verticalTarget = settleStep(restVertical, verticalPos, 0f, 1f)
+                        if (shouldRefresh && !refreshing) {
+                            refreshing = true
+                            onRetryRef.value()
+                        }
+                        runAnim {
+                            try {
+                                animateFloat(pullStart, 0f) { pullPx = it }
+                                animateFloat(verticalPos, verticalTarget) { verticalPos = it }
+                            } finally {
+                                refreshing = false
+                            }
+                        }
+                    }
+                    DragMode.DayBack -> {
+                        if (dayPos < 1f - SettleThreshold) closeDay() else runAnim { animateFloat(dayPos, 1f) { dayPos = it } }
+                    }
+                    DragMode.TenDayBack -> {
+                        goToVertical(if (verticalPos < 1f - SettleThreshold) 0f else 1f)
+                    }
+                    DragMode.None -> {
+                        val paneTarget = panePos.roundToInt().toFloat().coerceIn(0f, 2f)
+                        val verticalTarget = if (verticalPos >= 0.5f) 1f else 0f
+                        val dayTarget = when {
+                            dayPos >= 0.5f -> 1f
+                            dayPos > 0.02f -> 0f
+                            else -> dayPos
+                        }
+                        runAnim {
+                            animateFloat(panePos, paneTarget) { panePos = it }
+                            animateFloat(verticalPos, verticalTarget) { verticalPos = it }
+                            animateFloat(dayPos, dayTarget) { dayPos = it }
+                            if (dayTarget == 0f && visibleDay != null) {
+                                selectedDay = null
+                                visibleDay = null
+                            }
+                        }
+                    }
+                }
+            }
+            GestureRouter.onCancel = {
+                val mode = dragMode
+                dragAxis = DragAxis.None
+                dragMode = DragMode.None
+                when (mode) {
+                    DragMode.Pane -> goToPane(restPane)
+                    DragMode.VerticalHome -> {
+                        val pullStart = pullPx
+                        runAnim {
+                            animateFloat(pullStart, 0f) { pullPx = it }
+                            animateFloat(verticalPos, restVertical) { verticalPos = it }
+                        }
+                    }
+                    DragMode.DayBack -> runAnim { animateFloat(dayPos, restDay) { dayPos = it } }
+                    DragMode.TenDayBack -> goToVertical(restVertical)
+                    DragMode.None -> Unit
+                }
+            }
+            onDispose {
+                GestureRouter.onDown = null
+                GestureRouter.onDrag = null
+                GestureRouter.onRelease = null
+                GestureRouter.onCancel = null
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(((0f - panePos) * pageWidth).roundToInt(), 0) }
+                .padding(horizontal = 28.dp)
+        ) {
+            SearchPane(temperatureUnit = temperatureUnit, onClose = { goToPane(1f) })
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(((1f - panePos) * pageWidth).roundToInt(), 0) }
+                .padding(horizontal = 44.dp, vertical = 22.dp)
+                .clipToBounds()
+        ) {
+            when (weatherState) {
+                is WeatherState.Loading -> CenterMessage(weatherState.label)
+                is WeatherState.Error -> CenterMessage("weather unavailable\n${weatherState.message}\ntap to retry", onRetry)
+                is WeatherState.Ready -> ForecastPager(
+                    forecast = weatherState.forecast,
+                    verticalPos = verticalPos,
+                    dayPos = dayPos,
+                    pullPx = pullPx,
+                    refreshing = refreshing,
+                    visibleDay = visibleDay,
+                    pageWidth = pageWidth,
+                    pageHeight = pageHeight,
+                    onSelectDay = ::openDay,
+                    onBackToHome = { goToVertical(0f) },
+                    onBackFromDay = ::closeDay
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(((2f - panePos) * pageWidth).roundToInt(), 0) }
+                .padding(horizontal = 28.dp)
+        ) {
+            SettingsPane(
                 allowBackground = allowBackground,
                 homePlace = homePlace,
                 temperatureUnit = temperatureUnit,
                 onAllowBackgroundChange = onAllowBackgroundChange,
                 onHomePlaceChange = onHomePlaceChange,
                 onTemperatureUnitChange = onTemperatureUnitChange,
-                onClose = { onPaneChange(AppPane.Home) }
+                onClose = { goToPane(1f) }
             )
-            AppPane.Home -> when (weatherState) {
-                is WeatherState.Loading -> CenterMessage(weatherState.label)
-                is WeatherState.Error -> CenterMessage("weather unavailable\n${weatherState.message}\ntap to retry", onRetry)
-                is WeatherState.Ready -> Forecast(weatherState.forecast, onRetry, onPaneChange)
-            }
         }
+
         if (showIntro) IntroPopup(onDismiss = onIntroDismiss)
     }
 }
@@ -418,59 +666,52 @@ private fun IntroPopup(onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (AppPane) -> Unit) {
-    var page by remember { mutableStateOf(0) }
-    var selectedDay by remember(forecast.days) { mutableStateOf<LocalDate?>(null) }
-    var refreshing by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    DisposableEffect(page, selectedDay) {
-        GestureRouter.onSwipe = { dx, dy, _, startY ->
-            if (page == 0 && selectedDay == null && dy > 170f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
-                if (!refreshing) {
-                    refreshing = true
-                    onRetry()
-                    scope.launch {
-                        delay(420)
-                        refreshing = false
-                    }
-                }
-            } else if (page == 0 && selectedDay == null && dy < -120f && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
-                page = 1
-            } else if (page == 0 && selectedDay == null && startY < 720f && kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 110f) {
-                if (dx < 0f) onPaneChange(AppPane.Settings)
-                if (dx > 0f) onPaneChange(AppPane.Search)
-            } else if (page == 1 && selectedDay != null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) {
-                selectedDay = null
-            } else if (page == 1 && selectedDay == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) {
-                page = 0
-            }
-        }
-        GestureRouter.onMove = { _, _ -> }
-        onDispose {
-            GestureRouter.onSwipe = null
-            GestureRouter.onMove = null
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .offset(y = if (refreshing) 12.dp else 0.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        PullDots(visible = refreshing)
-
-        if (page == 0) {
+private fun ForecastPager(
+    forecast: Forecast,
+    verticalPos: Float,
+    dayPos: Float,
+    pullPx: Float,
+    refreshing: Boolean,
+    visibleDay: LocalDate?,
+    pageWidth: Float,
+    pageHeight: Float,
+    onSelectDay: (LocalDate) -> Unit,
+    onBackToHome: () -> Unit,
+    onBackFromDay: () -> Unit
+) {
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(0, ((0f - verticalPos) * pageHeight).roundToInt() + pullPx.roundToInt()) },
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            PullDots(pullPx = pullPx, refreshing = refreshing)
             CurrentAndHourlyPage(forecast)
-        } else {
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(0, ((1f - verticalPos) * pageHeight).roundToInt()) }
+                .background(Paper)
+        ) {
             TenDayPage(
                 forecast = forecast,
-                selectedDay = selectedDay,
-                onSelectDay = { selectedDay = it },
-                onBackToHome = { page = 0 },
-                onBackFromDay = { selectedDay = null }
+                scrollEnabled = verticalPos > 0.97f && dayPos < 0.03f,
+                onSelectDay = onSelectDay,
+                onBackToHome = onBackToHome
             )
+            if (visibleDay != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .offset { IntOffset(((1f - dayPos) * pageWidth).roundToInt(), 0) }
+                        .background(Paper)
+                ) {
+                    DayHourlyPage(forecast, visibleDay, dayPos > 0.97f, onBackFromDay)
+                }
+            }
         }
     }
 }
@@ -479,9 +720,9 @@ private fun Forecast(forecast: Forecast, onRetry: () -> Unit, onPaneChange: (App
 private fun CurrentAndHourlyPage(forecast: Forecast, showTenDayHint: Boolean = true) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(22.dp))
-        val displayCode = PreviewWeatherCode ?: forecast.current.displayCode
+        val displayCode = forecast.current.displayCode
         Row(verticalAlignment = Alignment.CenterVertically) {
-            WeatherGlyph(displayCode, Modifier.size(66.dp), animated = true)
+            WeatherGlyph(displayCode, Modifier.size(66.dp))
             Spacer(Modifier.width(24.dp))
             TextLine(formatTemp(forecast.current.temperature, forecast.unitSymbol), size = 50, weight = FontWeight.Light)
         }
@@ -505,16 +746,10 @@ private fun CurrentAndHourlyPage(forecast: Forecast, showTenDayHint: Boolean = t
 @Composable
 private fun TenDayPage(
     forecast: Forecast,
-    selectedDay: LocalDate?,
+    scrollEnabled: Boolean,
     onSelectDay: (LocalDate) -> Unit,
-    onBackToHome: () -> Unit,
-    onBackFromDay: () -> Unit
+    onBackToHome: () -> Unit
 ) {
-    if (selectedDay != null) {
-        DayHourlyPage(forecast, selectedDay, onBackFromDay)
-        return
-    }
-
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -522,13 +757,11 @@ private fun TenDayPage(
         TopArrow(onBackToHome)
         TextLine("10 day", size = 12, color = Rule)
         Spacer(Modifier.height(10.dp))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            userScrollEnabled = scrollEnabled
         ) {
-            forecast.days.take(10).forEach { day ->
+            items(forecast.days.take(10), key = { it.date.toString() }) { day ->
                 ForecastRow(
                     left = formatDay(day.date),
                     code = day.code,
@@ -536,15 +769,17 @@ private fun TenDayPage(
                     onClick = { onSelectDay(day.date) }
                 )
             }
-            Spacer(Modifier.height(18.dp))
-            TextLine("tap a day for hourly", size = 12, color = Rule)
-            Spacer(Modifier.height(12.dp))
+            item {
+                Spacer(Modifier.height(18.dp))
+                TextLine("tap a day for hourly", size = 12, color = Rule)
+                Spacer(Modifier.height(12.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Unit) {
+private fun DayHourlyPage(forecast: Forecast, date: LocalDate, scrollEnabled: Boolean, onBack: () -> Unit) {
     val day = forecast.days.firstOrNull { it.date == date }
     val hours = forecast.allHours.filter { it.time.toLocalDate() == date }
     val now = LocalDateTime.now()
@@ -558,7 +793,7 @@ private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Uni
         if (day != null) {
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                WeatherGlyph(day.code, Modifier.size(28.dp), animated = false)
+                WeatherGlyph(day.code, Modifier.size(28.dp))
                 Spacer(Modifier.width(12.dp))
                 TextLine(
                     "${formatTemp(day.high, forecast.unitSymbol)} / ${formatTemp(day.low, forecast.unitSymbol)}",
@@ -574,13 +809,11 @@ private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Uni
                 TextLine("no hourly data", size = 14, color = Rule)
             }
         } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                userScrollEnabled = scrollEnabled
             ) {
-                hours.forEach { hour ->
+                items(hours, key = { it.time.toString() }) { hour ->
                     val isNow = date == now.toLocalDate() && hour.time.hour == now.hour
                     ForecastRow(
                         left = formatHour(hour.time).lowercase(),
@@ -589,7 +822,7 @@ private fun DayHourlyPage(forecast: Forecast, date: LocalDate, onBack: () -> Uni
                         emphasized = isNow
                     )
                 }
-                Spacer(Modifier.height(20.dp))
+                item { Spacer(Modifier.height(20.dp)) }
             }
         }
     }
@@ -600,21 +833,33 @@ private fun SearchPane(temperatureUnit: String, onClose: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var places by remember { mutableStateOf(emptyList<Place>()) }
     var selectedPlace by remember { mutableStateOf<Place?>(null) }
+    var visiblePlace by remember { mutableStateOf<Place?>(null) }
     var selectedState by remember { mutableStateOf<WeatherState?>(null) }
+    var placePos by remember { mutableStateOf(0f) }
+    val scope = rememberCoroutineScope()
 
-    DisposableEffect(selectedPlace) {
-        GestureRouter.onSwipe = { dx, dy, _, _ ->
-            if (selectedPlace == null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx < -90f) {
-                onClose()
-            } else if (selectedPlace != null && kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) {
-                selectedPlace = null
-                selectedState = null
+    fun openPlace(place: Place) {
+        selectedPlace = place
+        visiblePlace = place
+        val start = placePos
+        scope.launch {
+            try {
+                animateFloat(start, 1f) { placePos = it }
+            } catch (_: CancellationException) {
             }
         }
-        GestureRouter.onMove = { _, _ -> }
-        onDispose {
-            GestureRouter.onSwipe = null
-            GestureRouter.onMove = null
+    }
+
+    fun closePlace() {
+        selectedPlace = null
+        val start = placePos
+        scope.launch {
+            try {
+                animateFloat(start, 0f) { placePos = it }
+                visiblePlace = null
+                selectedState = null
+            } catch (_: CancellationException) {
+            }
         }
     }
 
@@ -648,32 +893,40 @@ private fun SearchPane(temperatureUnit: String, onClose: () -> Unit) {
         }.getOrElse { WeatherState.Error(it.message ?: "weather unavailable") }
     }
 
-    if (selectedPlace != null) {
-        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-            TopArrow { selectedPlace = null; selectedState = null }
-            TextLine(selectedPlace!!.title.lowercase(), size = 18)
-            Spacer(Modifier.height(18.dp))
-            when (val state = selectedState) {
-                is WeatherState.Ready -> SearchForecast(state.forecast)
-                is WeatherState.Error -> CenterMessage("weather unavailable")
-                else -> CenterMessage("loading weather")
-            }
-        }
-        return
-    }
-
-    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-        TopArrow(onClose)
-        SearchField(value = query, onValueChange = { query = it }, placeholder = "search place")
-        Spacer(Modifier.height(22.dp))
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val width = constraints.maxWidth.toFloat().coerceAtLeast(1f)
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
+                .fillMaxSize()
+                .offset { IntOffset((-placePos * width).roundToInt(), 0) },
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            places.forEach { place ->
-                PlaceRow(place = place) { selectedPlace = place }
+            TopArrow(onClose)
+            SearchField(value = query, onValueChange = { query = it }, placeholder = "search place")
+            Spacer(Modifier.height(22.dp))
+            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                items(places, key = { "${it.title}-${it.latitude}-${it.longitude}" }) { place ->
+                    PlaceRow(place = place) { openPlace(place) }
+                }
+            }
+        }
+
+        if (visiblePlace != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .offset { IntOffset(((1f - placePos) * width).roundToInt(), 0) }
+                    .background(Paper),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                TopArrow { closePlace() }
+                TextLine(visiblePlace!!.title.lowercase(), size = 18)
+                Spacer(Modifier.height(18.dp))
+                when (val state = selectedState) {
+                    is WeatherState.Ready -> SearchForecast(state.forecast)
+                    is WeatherState.Error -> CenterMessage("weather unavailable")
+                    else -> CenterMessage("loading weather")
+                }
             }
         }
     }
@@ -691,17 +944,6 @@ private fun SettingsPane(
 ) {
     var homeQuery by remember { mutableStateOf("") }
     var places by remember { mutableStateOf(emptyList<Place>()) }
-
-    DisposableEffect(Unit) {
-        GestureRouter.onSwipe = { dx, dy, _, _ ->
-            if (kotlin.math.abs(dx) > kotlin.math.abs(dy) && dx > 90f) onClose()
-        }
-        GestureRouter.onMove = { _, _ -> }
-        onDispose {
-            GestureRouter.onSwipe = null
-            GestureRouter.onMove = null
-        }
-    }
 
     LaunchedEffect(homeQuery) {
         val trimmed = homeQuery.trim()
@@ -743,13 +985,8 @@ private fun SettingsPane(
             TextLine("current: ${homePlace.title.lowercase()}", size = 13, color = Rule)
         }
         Spacer(Modifier.height(14.dp))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-        ) {
-            places.forEach { place ->
+        LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            items(places, key = { "${it.title}-${it.latitude}-${it.longitude}" }) { place ->
                 PlaceRow(place = place) {
                     homeQuery = place.title
                     onHomePlaceChange(place)
@@ -859,22 +1096,17 @@ private fun OvalSwitch(checked: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PullDots(visible: Boolean) {
-    var tick by remember { mutableStateOf(0) }
-    if (visible) {
-        LaunchedEffect(Unit) {
-            tick = 0
-            delay(450)
-            tick = 1
-            delay(450)
-            tick = 2
-        }
+private fun PullDots(pullPx: Float, refreshing: Boolean) {
+    val visible = refreshing || pullPx > 6f
+    val count = when {
+        refreshing -> 3
+        pullPx > 64f -> 3
+        pullPx > 32f -> 2
+        else -> 1
     }
-
     Box(Modifier.height(18.dp), contentAlignment = Alignment.Center) {
         if (visible) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val count = tick + 1
                 repeat(count) {
                     Box(
                         Modifier
@@ -893,13 +1125,12 @@ private fun HourlyStrip(hours: List<HourForecast>, unitSymbol: String) {
         TextLine("no hourly data", size = 13, color = Rule)
         return
     }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(end = 8.dp)
     ) {
-        hours.forEachIndexed { index, hour ->
+        itemsIndexed(hours, key = { _, hour -> hour.time.toString() }) { index, hour ->
             HourCard(
                 hour = hour,
                 isCurrent = index == 0,
@@ -922,7 +1153,7 @@ private fun HourCard(hour: HourForecast, isCurrent: Boolean, unitSymbol: String,
     ) {
         TextLine(formatHour(hour.time).lowercase(), size = 13)
         Spacer(Modifier.height(6.dp))
-        WeatherGlyph(hour.code, Modifier.size(22.dp), animated = false)
+        WeatherGlyph(hour.code, Modifier.size(22.dp))
         Spacer(Modifier.height(6.dp))
         TextLine(formatTemp(hour.temperature, unitSymbol), size = 16)
     }
@@ -947,16 +1178,9 @@ private fun ForecastRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         TextLine(left.lowercase(), size = 17, modifier = Modifier.weight(1f), align = TextAlign.Start)
-        WeatherGlyph(code, Modifier.size(30.dp), animated = false)
+        WeatherGlyph(code, Modifier.size(30.dp))
         TextLine(right, size = 17, modifier = Modifier.weight(1f), align = TextAlign.End)
     }
-}
-
-@Composable
-private fun SectionTitle(title: String) {
-    Spacer(Modifier.height(28.dp))
-    TextLine(title, size = 17, weight = FontWeight.Normal)
-    Spacer(Modifier.height(14.dp))
 }
 
 @Composable
@@ -1004,7 +1228,7 @@ private fun TextLine(
 }
 
 @Composable
-private fun WeatherGlyph(code: Int, modifier: Modifier = Modifier, animated: Boolean = true) {
+private fun WeatherGlyph(code: Int, modifier: Modifier = Modifier) {
     Image(
         painter = painterResource(id = weatherIconRes(code)),
         contentDescription = weatherLabel(code),
@@ -1023,170 +1247,6 @@ private fun weatherIconRes(code: Int): Int = when {
     code in 71..77 || code in 85..86 -> R.drawable.ic_weather_snow
     code in 95..99 -> R.drawable.ic_weather_storm
     else -> R.drawable.ic_weather_cloud
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCloud(stroke: Stroke, phase: Float = 0f) {
-    val w = size.width
-    val h = size.height
-    val breathe = kotlin.math.sin(phase * Math.PI.toFloat() * 2f) * w * 0.012f
-    drawArc(Ink, 180f, 180f, false, topLeft = Offset(w * 0.18f - breathe, h * 0.38f), size = Size(w * 0.30f, h * 0.28f), style = stroke)
-    drawArc(Ink, 180f, 180f, false, topLeft = Offset(w * 0.35f, h * 0.26f - breathe * 0.35f), size = Size(w * 0.34f + breathe * 0.8f, h * 0.40f), style = stroke)
-    drawArc(Ink, 180f, 180f, false, topLeft = Offset(w * 0.58f + breathe, h * 0.40f), size = Size(w * 0.24f, h * 0.26f), style = stroke)
-    drawLine(Ink, Offset(w * 0.24f - breathe, h * 0.66f), Offset(w * 0.78f + breathe, h * 0.66f), strokeWidth = stroke.width, cap = StrokeCap.Round)
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFullCloud(stroke: Stroke, phase: Float = 0f) {
-    drawCloud(stroke, phase)
-    val w = size.width
-    val h = size.height
-    val breathe = kotlin.math.sin(phase * Math.PI.toFloat() * 2f) * w * 0.008f
-    drawArc(Ink, 180f, 180f, false, topLeft = Offset(w * 0.28f - breathe, h * 0.46f), size = Size(w * 0.22f, h * 0.18f), style = stroke)
-    drawArc(Ink, 180f, 180f, false, topLeft = Offset(w * 0.50f + breathe, h * 0.45f), size = Size(w * 0.20f, h * 0.18f), style = stroke)
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPartlyCloudy(stroke: Stroke, phase: Float = 0f) {
-    val w = size.width
-    val h = size.height
-    val peek = kotlin.math.sin(phase * Math.PI.toFloat() * 2f) * w * 0.015f
-    val sunCenter = Offset(w * 0.62f, h * 0.36f - peek)
-    val sunRadius = w * 0.15f
-    drawCircle(Ink, radius = sunRadius, center = sunCenter, style = stroke)
-    for (i in 0 until 5) {
-        val angle = Math.toRadians((-120 + i * 30).toDouble())
-        drawLine(
-            Ink,
-            Offset(sunCenter.x + kotlin.math.cos(angle).toFloat() * sunRadius * 1.35f, sunCenter.y + kotlin.math.sin(angle).toFloat() * sunRadius * 1.35f),
-            Offset(sunCenter.x + kotlin.math.cos(angle).toFloat() * sunRadius * 1.65f, sunCenter.y + kotlin.math.sin(angle).toFloat() * sunRadius * 1.65f),
-            strokeWidth = stroke.width,
-            cap = StrokeCap.Round
-        )
-    }
-    drawCloud(stroke, phase)
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawOvercast(stroke: Stroke, phase: Float = 0f) {
-    val w = size.width
-    val h = size.height
-    drawCloud(stroke, phase)
-    val spread = 1f + kotlin.math.sin(phase * Math.PI.toFloat() * 2f) * 0.18f
-    val starts = listOf(0.40f to 0.76f, 0.50f to 0.78f, 0.60f to 0.76f)
-    val lengths = listOf(0.12f, 0.18f, 0.12f)
-    for (i in starts.indices) {
-        val (x, y) = starts[i]
-        val dx = (i - 1) * 0.035f * spread
-        drawLine(
-            Ink,
-            Offset(w * x, h * y),
-            Offset(w * (x + dx), h * (y + lengths[i] * spread)),
-            strokeWidth = stroke.width * 0.75f,
-            cap = StrokeCap.Round
-        )
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFog(width: Float, phase: Float = 0f) {
-    val w = size.width
-    val h = size.height
-    val shift = kotlin.math.sin(phase * Math.PI.toFloat() * 2f) * w * 0.025f
-    for ((index, y) in listOf(0.38f, 0.52f, 0.66f).withIndex()) {
-        val inset = if (index == 1) 0.18f else 0.26f
-        drawLine(
-            Ink,
-            Offset(w * inset + shift, h * y),
-            Offset(w * (1f - inset) + shift, h * y),
-            strokeWidth = width,
-            cap = StrokeCap.Round
-        )
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawWindCondition(width: Float, phase: Float = 0f) {
-    val w = size.width
-    val h = size.height
-    val shift = kotlin.math.sin(phase * Math.PI.toFloat() * 2f) * w * 0.025f
-    for ((index, y) in listOf(0.36f, 0.52f, 0.68f).withIndex()) {
-        val start = listOf(0.18f, 0.12f, 0.22f)[index]
-        val end = listOf(0.72f, 0.66f, 0.58f)[index]
-        drawLine(Ink, Offset(w * start + shift, h * y), Offset(w * end + shift, h * y), strokeWidth = width, cap = StrokeCap.Round)
-        drawArc(
-            Ink,
-            270f,
-            210f,
-            false,
-            topLeft = Offset(w * (end - 0.075f) + shift, h * (y - 0.075f)),
-            size = Size(w * 0.15f, h * 0.15f),
-            style = Stroke(width = width, cap = StrokeCap.Round)
-        )
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawWind(width: Float, phase: Float = 0f) {
-    val w = size.width
-    val h = size.height
-    val shift = ((phase * 2f) % 1f) * w * 0.10f
-    for ((y, len) in listOf(0.76f to 0.34f, 0.86f to 0.25f)) {
-        drawLine(
-            Ink,
-            Offset(w * (0.26f + shift / w), h * y),
-            Offset(w * (0.26f + len + shift / w), h * y),
-            strokeWidth = width * 0.75f,
-            cap = StrokeCap.Round
-        )
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawRain(width: Float, phase: Float = 0f) {
-    val drops = listOf(
-        0.30f to 0.00f,
-        0.42f to 0.37f,
-        0.54f to 0.14f,
-        0.66f to 0.51f,
-        0.36f to 0.72f,
-        0.48f to 0.88f,
-        0.60f to 0.66f,
-        0.72f to 0.24f
-    )
-    for ((x, offset) in drops) {
-        val t = (phase + offset) % 1f
-        val y = 0.66f + t * 0.38f
-        if (y > 0.98f) continue
-        drawLine(
-            Ink,
-            Offset(size.width * x, size.height * y),
-            Offset(size.width * (x - 0.025f), size.height * (y + 0.08f)),
-            strokeWidth = width * 0.85f,
-            cap = StrokeCap.Round
-        )
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSnow(width: Float, phase: Float = 0f) {
-    val flakes = listOf(
-        0.30f to 0.00f,
-        0.43f to 0.31f,
-        0.56f to 0.14f,
-        0.68f to 0.47f,
-        0.36f to 0.63f,
-        0.50f to 0.82f,
-        0.62f to 0.72f,
-        0.74f to 0.21f
-    )
-    for ((x, offset) in flakes) {
-        val t = (phase + offset) % 1f
-        val sway = kotlin.math.sin((t + offset) * Math.PI.toFloat() * 2f) * 0.025f
-        val y = 0.68f + t * 0.30f
-        if (y > 0.96f) continue
-        drawCircle(
-            Ink,
-            radius = width * 0.52f,
-            center = Offset(size.width * (x + sway), size.height * y)
-        )
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSleet(width: Float, phase: Float = 0f) {
-    drawRain(width * 0.82f, phase)
-    drawSnow(width * 0.95f, (phase + 0.38f) % 1f)
 }
 
 private fun openMeteoConnection(url: String): HttpURLConnection {
@@ -1227,7 +1287,7 @@ private suspend fun fetchWeather(
 
 private fun parseWeatherBody(
     body: String,
-    fallback: Boolean,
+    @Suppress("UNUSED_PARAMETER") fallback: Boolean,
     locationLabel: String,
     temperatureUnit: String,
     referenceNow: LocalDateTime? = null
@@ -1272,7 +1332,6 @@ private fun parseWeatherBody(
             hours = hours,
             allHours = allHours,
             days = days,
-            usedFallbackLocation = fallback,
             locationLabel = locationLabel,
             unitSymbol = if (temperatureUnit == "celsius") "°C" else "°F"
         )
@@ -1359,11 +1418,11 @@ private suspend fun Context.bestCurrentPoint(): Location? {
     return runCatching {
         withTimeoutOrNull(LocationTimeoutMs) {
             suspendCancellableCoroutine<Location?> { continuation ->
-            val cancellationSignal = CancellationSignal()
-            manager.getCurrentLocation(provider, cancellationSignal, mainExecutor) { location ->
-                continuation.resume(location ?: lastKnown)
-            }
-            continuation.invokeOnCancellation { cancellationSignal.cancel() }
+                val cancellationSignal = CancellationSignal()
+                manager.getCurrentLocation(provider, cancellationSignal, mainExecutor) { location ->
+                    continuation.resume(location ?: lastKnown)
+                }
+                continuation.invokeOnCancellation { cancellationSignal.cancel() }
             }
         }
     }.getOrNull() ?: lastKnown
@@ -1418,7 +1477,6 @@ private data class Forecast(
     val hours: List<HourForecast>,
     val allHours: List<HourForecast>,
     val days: List<DayForecast>,
-    val usedFallbackLocation: Boolean,
     val locationLabel: String,
     val unitSymbol: String
 )
@@ -1426,6 +1484,7 @@ private data class Forecast(
 private data class CurrentForecast(val temperature: Double, val code: Int, val windSpeed: Double) {
     val displayCode: Int = if (windSpeed >= 35.0 && code in 0..3) -1 else code
 }
+
 private data class HourForecast(val time: LocalDateTime, val temperature: Double, val code: Int)
 private data class DayForecast(val date: LocalDate, val high: Double, val low: Double, val code: Int)
 private data class Place(val title: String, val latitude: Double, val longitude: Double)
